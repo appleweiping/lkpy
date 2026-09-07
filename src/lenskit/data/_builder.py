@@ -51,6 +51,7 @@ _log = get_logger(__name__)
 
 type TableInput = pd.DataFrame | pa.Table | dict[str, NDArray[Any]]
 type RelationshipEntities = Sequence[str] | Mapping[str, str | None]
+type TimestampUnit = Literal["s", "ms", "us", "ns"]
 
 type DuplicateAction = Literal["update", "error", "overwrite"]
 """
@@ -570,6 +571,7 @@ class DatasetBuilder:
         allow_repeats: bool = True,
         default: bool = False,
         remove_repeats: bool | Literal["exact"] = False,
+        timestamp_unit: TimestampUnit | None = None,
     ) -> None:
         """
         Add a interaction records to the data set.
@@ -607,7 +609,12 @@ class DatasetBuilder:
             remove_repeats:
                 If ``True``, repeated interactions will be removed. If ``"exact"``,
                 duplicated interactions will be removed.
+            timestamp_unit:
+                The unit of numeric values in the ``timestamp`` column. If omitted,
+                integer units are inferred and floating-point values are assumed to
+                be seconds. Numeric timestamps are converted to Arrow timestamps.
         """
+        data = _convert_interaction_timestamps(data, timestamp_unit)
         self.add_relationships(
             cls,
             data,
@@ -1226,6 +1233,84 @@ def _expand_and_align_list_array(
 
 def _empty_rel_table(types: list[str]) -> pa.Table:
     return pa.table({num_col_name(t): pa.array([], pa.int32()) for t in types})
+
+
+_TIMESTAMP_UNITS: tuple[TimestampUnit, ...] = ("s", "ms", "us", "ns")
+_TIMESTAMP_UNIT_FACTORS: dict[TimestampUnit, int] = {
+    "s": 1,
+    "ms": 1_000,
+    "us": 1_000_000,
+    "ns": 1_000_000_000,
+}
+_TIMESTAMP_MIN_SECONDS = -2_208_988_800
+_TIMESTAMP_MAX_SECONDS = 4_102_444_800
+
+
+def _convert_interaction_timestamps(
+    data: TableInput, timestamp_unit: TimestampUnit | None
+) -> pa.Table:
+    if timestamp_unit is not None and timestamp_unit not in _TIMESTAMP_UNITS:
+        raise ValueError(f"invalid timestamp unit {timestamp_unit!r}")
+
+    if isinstance(data, pd.DataFrame):
+        table = pa.Table.from_pandas(data, preserve_index=False)
+    elif isinstance(data, dict):
+        table = pa.table(data)  # type: ignore
+    else:
+        table = data
+
+    column_idx = table.schema.get_field_index("timestamp")
+    if column_idx < 0:
+        return table
+
+    timestamps = table.column(column_idx)
+    column_type = timestamps.type
+    if pa.types.is_timestamp(column_type):
+        return table
+
+    if pa.types.is_null(column_type):
+        converted = pa.nulls(len(timestamps), pa.timestamp(timestamp_unit or "s"))
+    elif pa.types.is_floating(column_type):
+        values = pc.if_else(
+            pc.is_nan(timestamps),
+            pa.scalar(None, column_type),
+            timestamps,
+        )
+        if timestamp_unit is None:
+            values = pc.multiply(values, 1_000)
+            timestamp_unit = "ms"
+        values = pc.cast(pc.round(values), pa.int64())
+        converted = pc.cast(values, pa.timestamp(timestamp_unit))
+    elif pa.types.is_integer(column_type):
+        timestamp_unit = timestamp_unit or _infer_timestamp_unit(timestamps)
+        converted = pc.cast(timestamps, pa.timestamp(timestamp_unit))
+    else:
+        return table
+
+    return table.set_column(column_idx, "timestamp", converted)
+
+
+def _infer_timestamp_unit(timestamps: pa.ChunkedArray) -> TimestampUnit:
+    valid_count = len(timestamps) - timestamps.null_count
+    if valid_count == 0:
+        return "s"
+
+    # Loss of integer precision is harmless for this coarse range check, and
+    # permitting it lets us inspect microsecond and nanosecond epoch values.
+    values = pc.cast(timestamps, pa.float64(), safe=False)
+    for unit in _TIMESTAMP_UNITS:
+        factor = _TIMESTAMP_UNIT_FACTORS[unit]
+        in_range = pc.and_(
+            pc.greater_equal(values, float(_TIMESTAMP_MIN_SECONDS * factor)),
+            pc.less(values, float(_TIMESTAMP_MAX_SECONDS * factor)),
+        )
+        in_range_count = pc.sum(pc.fill_null(in_range, False)).as_py() or 0
+        if in_range_count / valid_count >= 0.95:
+            return unit
+
+    raise ValueError(
+        "could not infer timestamp unit because fewer than 95% of values fall between 1900 and 2099"
+    )
 
 
 def _conform_time(time: float | str | dt.datetime, col_type: pa.DataType):

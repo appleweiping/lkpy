@@ -135,6 +135,124 @@ def test_add_interactions_table():
     assert np.all(mat.rowptrs == [0, 2, 3, 6])
 
 
+@mark.parametrize(
+    ("unit", "value"),
+    [
+        ("s", 1_700_000_000),
+        ("ms", 1_700_000_000_000),
+        ("us", 1_700_000_000_000_000),
+        ("ns", 1_700_000_000_000_000_000),
+    ],
+)
+def test_add_interactions_infers_integer_timestamp_unit(unit: str, value: int):
+    dsb = DatasetBuilder()
+    dsb.add_interactions(
+        "click",
+        pa.table({"user_id": ["a"], "item_id": ["x"], "timestamp": [value]}),
+        entities=["user", "item"],
+        missing="insert",
+    )
+
+    log = dsb.build().interaction_table(format="arrow")
+    assert log.field("timestamp").type == pa.timestamp(unit)
+    assert log.column("timestamp").cast(pa.int64()).to_pylist() == [value]
+
+
+def test_add_interactions_float_timestamp_uses_milliseconds_and_nulls_nan():
+    dsb = DatasetBuilder()
+    dsb.add_interactions(
+        "click",
+        pa.table(
+            {
+                "user_id": ["a", "b", "c"],
+                "item_id": ["x", "y", "z"],
+                "timestamp": pa.array([1_700_000_000.125, float("nan"), None]),
+            }
+        ),
+        entities=["user", "item"],
+        missing="insert",
+    )
+
+    log = dsb.build().interaction_table(format="arrow")
+    assert log.field("timestamp").type == pa.timestamp("ms")
+    assert log.column("timestamp").cast(pa.int64()).to_pylist() == [1_700_000_000_125, None, None]
+
+
+def test_add_interactions_preserves_existing_timestamp_type():
+    timestamps = pa.array([1_700_000_000_000_000], type=pa.timestamp("us"))
+    dsb = DatasetBuilder()
+    dsb.add_interactions(
+        "click",
+        pa.table({"user_id": ["a"], "item_id": ["x"], "timestamp": timestamps}),
+        entities=["user", "item"],
+        missing="insert",
+        timestamp_unit="s",
+    )
+
+    log = dsb.build().interaction_table(format="arrow")
+    assert log.field("timestamp").type == pa.timestamp("us")
+
+
+def test_add_interactions_promotes_timestamp_units_across_batches():
+    dsb = DatasetBuilder()
+    dsb.add_interactions(
+        "click",
+        pa.table({"user_id": ["a"], "item_id": ["x"], "timestamp": [1_700_000_000]}),
+        entities=["user", "item"],
+        missing="insert",
+    )
+    dsb.add_interactions(
+        "click",
+        pa.table({"user_id": ["b"], "item_id": ["y"], "timestamp": [1_700_000_000_001]}),
+        entities=["user", "item"],
+        missing="insert",
+    )
+
+    log = dsb.build().interaction_table(format="arrow")
+    assert log.field("timestamp").type == pa.timestamp("ms")
+    assert sorted(log.column("timestamp").cast(pa.int64()).to_pylist()) == [
+        1_700_000_000_000,
+        1_700_000_000_001,
+    ]
+
+
+def test_add_interactions_timestamp_inference_tolerates_five_percent_outliers():
+    values = [1_700_000_000] * 19 + [np.iinfo(np.int64).max]
+    dsb = DatasetBuilder()
+    dsb.add_interactions(
+        "click",
+        pa.table(
+            {
+                "user_id": [f"u{i}" for i in range(20)],
+                "item_id": [f"i{i}" for i in range(20)],
+                "timestamp": values,
+            }
+        ),
+        entities=["user", "item"],
+        missing="insert",
+    )
+
+    log = dsb.build().interaction_table(format="arrow")
+    assert log.field("timestamp").type == pa.timestamp("s")
+
+
+def test_add_interactions_timestamp_inference_rejects_unrecognizable_values():
+    dsb = DatasetBuilder()
+    with raises(ValueError, match="could not infer timestamp unit"):
+        dsb.add_interactions(
+            "click",
+            pa.table(
+                {
+                    "user_id": ["a"],
+                    "item_id": ["x"],
+                    "timestamp": [np.iinfo(np.int64).max],
+                }
+            ),
+            entities=["user", "item"],
+            missing="insert",
+        )
+
+
 def test_add_interactions_count_method():
     dsb = DatasetBuilder()
 
