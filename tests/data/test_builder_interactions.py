@@ -218,6 +218,68 @@ def test_add_interactions_preserves_existing_timestamp_type():
     assert log.field("timestamp").type == pa.timestamp("us")
 
 
+def test_add_interactions_respects_explicit_integer_timestamp_unit():
+    value = _REFERENCE_TIMESTAMP_SECONDS * 1_000
+    dsb = DatasetBuilder()
+    dsb.add_interactions(
+        "click",
+        pa.table({"user_id": ["a"], "item_id": ["x"], "timestamp": [value]}),
+        entities=["user", "item"],
+        missing="insert",
+        timestamp_unit="ms",
+    )
+
+    log = dsb.build().interaction_table(format="arrow")
+    assert log.field("timestamp").type == pa.timestamp("ms")
+    assert log.column("timestamp").cast(pa.int64()).to_pylist() == [value]
+
+
+def test_add_interactions_converts_null_timestamp_column():
+    dsb = DatasetBuilder()
+    dsb.add_interactions(
+        "click",
+        pa.table(
+            {
+                "user_id": ["a", "b"],
+                "item_id": ["x", "y"],
+                "timestamp": pa.nulls(2),
+            }
+        ),
+        entities=["user", "item"],
+        missing="insert",
+    )
+
+    log = dsb.build().interaction_table(format="arrow")
+    assert log.field("timestamp").type == pa.timestamp("s")
+    assert log.column("timestamp").to_pylist() == [None, None]
+
+
+def test_add_interactions_preserves_nonnumeric_timestamp_column():
+    dsb = DatasetBuilder()
+    dsb.add_interactions(
+        "click",
+        pa.table({"user_id": ["a"], "item_id": ["x"], "timestamp": ["unknown"]}),
+        entities=["user", "item"],
+        missing="insert",
+    )
+
+    log = dsb.build().interaction_table(format="arrow")
+    assert log.field("timestamp").type == pa.string()
+    assert log.column("timestamp").to_pylist() == ["unknown"]
+
+
+def test_add_interactions_rejects_invalid_timestamp_unit():
+    dsb = DatasetBuilder()
+    with raises(ValueError, match="invalid timestamp unit"):
+        dsb.add_interactions(
+            "click",
+            pa.table({"user_id": ["a"], "item_id": ["x"], "timestamp": [1]}),
+            entities=["user", "item"],
+            missing="insert",
+            timestamp_unit="minutes",  # type: ignore[arg-type]
+        )
+
+
 def test_add_interactions_promotes_timestamp_units_across_batches():
     dsb = DatasetBuilder()
     dsb.add_interactions(
