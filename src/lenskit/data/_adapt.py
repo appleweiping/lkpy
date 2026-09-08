@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
-from ._builder import DatasetBuilder, TimestampUnit
+from ._builder import DatasetBuilder
 from ._dataset import Dataset
 from ._vocab import Vocabulary
 from .types import ID, AliasedColumn, Column, IDSequence
@@ -111,7 +111,7 @@ def from_interactions_df(
     users: IDSequence | pd.Index | Iterable[ID] | Vocabulary | None = None,
     items: IDSequence | pd.Index | Iterable[ID] | Vocabulary | None = None,
     class_name: str = "rating",
-    timestamp_unit: TimestampUnit | None = None,
+    timestamp_unit: Literal["s", "ms", "us", "ns"] | None = None,
 ) -> Dataset:
     """
     Create a dataset from a data frame of ratings or other user-item

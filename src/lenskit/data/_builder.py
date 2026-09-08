@@ -51,7 +51,6 @@ _log = get_logger(__name__)
 
 type TableInput = pd.DataFrame | pa.Table | dict[str, NDArray[Any]]
 type RelationshipEntities = Sequence[str] | Mapping[str, str | None]
-type TimestampUnit = Literal["s", "ms", "us", "ns"]
 
 type DuplicateAction = Literal["update", "error", "overwrite"]
 """
@@ -392,6 +391,7 @@ class DatasetBuilder:
         interaction: bool | Literal["default"] = False,
         _warning_parent: int = 0,
         remove_repeats: bool | Literal["exact"] = False,
+        timestamp_unit: Literal["s", "ms", "us", "ns"] | None = None,
     ) -> None:
         """
         Add relationship records to the data set.
@@ -424,6 +424,10 @@ class DatasetBuilder:
             remove_repeats:
                 If ``True``, repeated interactions will be removed. If ``"exact"``,
                 duplicated interactions will be removed.
+            timestamp_unit:
+                The unit of numeric values in the ``timestamp`` column. If omitted,
+                integer units are inferred and floating-point values are assumed to
+                be seconds. Numeric timestamps are converted to Arrow timestamps.
         """
         if isinstance(data, pd.DataFrame):
             table = pa.Table.from_pandas(data, preserve_index=False)
@@ -431,6 +435,8 @@ class DatasetBuilder:
             table = pa.table(data)  # type: ignore
         else:
             table = data
+
+        table = _convert_relationship_timestamps(table, timestamp_unit)
 
         log = self._log.bind(class_name=cls, count=table.num_rows)
 
@@ -571,7 +577,7 @@ class DatasetBuilder:
         allow_repeats: bool = True,
         default: bool = False,
         remove_repeats: bool | Literal["exact"] = False,
-        timestamp_unit: TimestampUnit | None = None,
+        timestamp_unit: Literal["s", "ms", "us", "ns"] | None = None,
     ) -> None:
         """
         Add a interaction records to the data set.
@@ -614,7 +620,6 @@ class DatasetBuilder:
                 integer units are inferred and floating-point values are assumed to
                 be seconds. Numeric timestamps are converted to Arrow timestamps.
         """
-        data = _convert_interaction_timestamps(data, timestamp_unit)
         self.add_relationships(
             cls,
             data,
@@ -624,6 +629,7 @@ class DatasetBuilder:
             interaction="default" if default else True,
             _warning_parent=1,
             remove_repeats=remove_repeats,
+            timestamp_unit=timestamp_unit,
         )
 
     def filter_interactions(
@@ -1235,29 +1241,28 @@ def _empty_rel_table(types: list[str]) -> pa.Table:
     return pa.table({num_col_name(t): pa.array([], pa.int32()) for t in types})
 
 
-_TIMESTAMP_UNITS: tuple[TimestampUnit, ...] = ("s", "ms", "us", "ns")
-_TIMESTAMP_UNIT_FACTORS: dict[TimestampUnit, int] = {
+_TIMESTAMP_UNITS: tuple[Literal["s", "ms", "us", "ns"], ...] = (
+    "s",
+    "ms",
+    "us",
+    "ns",
+)
+_TIMESTAMP_UNIT_FACTORS: dict[Literal["s", "ms", "us", "ns"], int] = {
     "s": 1,
     "ms": 1_000,
     "us": 1_000_000,
     "ns": 1_000_000_000,
 }
-_TIMESTAMP_MIN_SECONDS = -2_208_988_800
-_TIMESTAMP_MAX_SECONDS = 4_102_444_800
+_TIMESTAMP_MIN_SECONDS = int(dt.datetime.fromisoformat("1900-01-01T00:00:00+00:00").timestamp())
+_TIMESTAMP_MAX_SECONDS = int(dt.datetime.fromisoformat("2100-01-01T00:00:00+00:00").timestamp())
 
 
-def _convert_interaction_timestamps(
-    data: TableInput, timestamp_unit: TimestampUnit | None
+def _convert_relationship_timestamps(
+    table: pa.Table,
+    timestamp_unit: Literal["s", "ms", "us", "ns"] | None,
 ) -> pa.Table:
     if timestamp_unit is not None and timestamp_unit not in _TIMESTAMP_UNITS:
         raise ValueError(f"invalid timestamp unit {timestamp_unit!r}")
-
-    if isinstance(data, pd.DataFrame):
-        table = pa.Table.from_pandas(data, preserve_index=False)
-    elif isinstance(data, dict):
-        table = pa.table(data)  # type: ignore
-    else:
-        table = data
 
     column_idx = table.schema.get_field_index("timestamp")
     if column_idx < 0:
@@ -1290,7 +1295,9 @@ def _convert_interaction_timestamps(
     return table.set_column(column_idx, "timestamp", converted)
 
 
-def _infer_timestamp_unit(timestamps: pa.ChunkedArray) -> TimestampUnit:
+def _infer_timestamp_unit(
+    timestamps: pa.ChunkedArray,
+) -> Literal["s", "ms", "us", "ns"]:
     valid_count = len(timestamps) - timestamps.null_count
     if valid_count == 0:
         return "s"
